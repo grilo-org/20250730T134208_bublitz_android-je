@@ -1,0 +1,125 @@
+name: "SonarCloud Analysis"
+
+on:
+  push:
+    branches: [ "master" ]
+  workflow_dispatch: {}
+
+jobs:
+  sonar-scan:
+    name: SonarCloud Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detectar a Raiz do Projeto (Universal)
+        id: find-root
+        shell: bash
+        run: |
+          MARKER_FILES=(
+            "pubspec.yaml" "package.json" "composer.json" 
+            "pom.xml" "go.mod" "Gemfile" 
+            "pyproject.toml" "Package.swift" "*.csproj"
+            "build.gradle" "build.gradle.kts" "requirements.txt"
+          )
+          PROJECT_DIR="."
+          
+          for marker in "${MARKER_FILES[@]}"; do
+            path=$(find . -not -path "./.git/*" -name "$marker" -print -quit)
+            if [ -n "$path" ]; then
+              PROJECT_DIR=$(dirname "$path")
+              echo "Projeto detectado em: $PROJECT_DIR (marcador: $marker)"
+              break
+            fi
+          done
+          
+          echo "Diretório final do projeto: $PROJECT_DIR"
+          echo "PROJECT_PATH=$PROJECT_DIR" >> $GITHUB_ENV
+
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Get project creation year
+        id: get_year
+        run: echo "year=$(git log --reverse --format=%cd --date=format:%Y | head -n 1)" >> $GITHUB_OUTPUT
+
+      - name: Clean Local Properties
+        run: |
+          echo "Limpando qualquer 'local.properties' em todo o projeto..."
+          find . -name "local.properties" -type f -delete
+
+      - name: Build and Analyze Project
+        id: build
+        working-directory: ${{ env.PROJECT_PATH }}
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          BASE_SONAR_ARGS: "-Dsonar.projectKey=grilo-org_20250730T134208_bublitz_android-je -Dsonar.organization=grilo-org -Dsonar.host.url=https://sonarcloud.io"
+        shell: bash
+        run: |
+          echo "BUILD_SUCCESS=true" >> $GITHUB_ENV
+          echo "SONAR_ANALYSIS_PERFORMED=true" >> $GITHUB_ENV
+
+          if [ -f "pom.xml" ]; then
+            echo "Maven project detected. Building with mvn..."
+            mvn clean compile -DskipTests || echo "BUILD_SUCCESS=false" >> $GITHUB_ENV
+            echo "SONAR_ANALYSIS_PERFORMED=false" >> $GITHUB_ENV
+            exit 0
+          fi
+
+          if [ ! -f "build.gradle" ] && [ ! -f "build.gradle.kts" ]; then
+            echo "No build file found. Skipping build."
+            exit 0
+          fi
+          
+          # COMANDO SIMPLIFICADO E CORRIGIDO
+          echo "Injetando biblioteca legada do Apache HTTP..."
+          echo "android.useLibrary 'org.apache.http.legacy'" >> build.gradle
+
+          if [ -f "./gradlew" ]; then
+            echo "Gradle Wrapper detectado. Executando build e análise Sonar..."
+            chmod +x ./gradlew
+            ./gradlew build sonarqube -Dsonar.login=$SONAR_TOKEN $BASE_SONAR_ARGS || echo "BUILD_SUCCESS=false" >> $GITHUB_ENV
+          else
+            echo "Gradle Wrapper NÃO detectado. Preparando para fallback..."
+            echo "NEEDS_FALLBACK_GRADLE=true" >> $GITHUB_ENV
+          fi
+
+      - name: Setup Gradle (Fallback)
+        if: env.NEEDS_FALLBACK_GRADLE == 'true'
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: ${{ (steps.get_year.outputs.year >= 2022 && '7.6.3') || (steps.get_year.outputs.year == 2021 && '7.4.2') || '6.7.1' }}
+          cache-disabled: true
+
+      - name: Run Gradle Build and Analysis (Fallback)
+        if: env.NEEDS_FALLBACK_GRADLE == 'true'
+        working-directory: ${{ env.PROJECT_PATH }}
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          BASE_SONAR_ARGS: "-Dsonar.projectKey=grilo-org_20250730T134208_bublitz_android-je -Dsonar.organization=grilo-org -Dsonar.host.url=https://sonarcloud.io"
+        shell: bash
+        run: |
+          # COMANDO SIMPLIFICADO E CORRIGIDO
+          echo "Injetando biblioteca legada do Apache HTTP..."
+          echo "android.useLibrary 'org.apache.http.legacy'" >> build.gradle
+
+          echo "Executando build com a versão do Gradle inferida..."
+          gradle build sonarqube -Dsonar.login=$SONAR_TOKEN $BASE_SONAR_ARGS || echo "BUILD_SUCCESS=false" >> $GITHUB_ENV
+
+
+      - name: SonarCloud Scan for Maven
+        if: env.SONAR_ANALYSIS_PERFORMED == 'false'
+        uses: SonarSource/sonarqube-scan-action@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          projectBaseDir: ${{ env.PROJECT_PATH }}
+          args: -Dsonar.projectKey=grilo-org_20250730T134208_bublitz_android-je -Dsonar.organization=grilo-org -Dsonar.host.url=https://sonarcloud.io -Dsonar.java.binaries=target/classes
